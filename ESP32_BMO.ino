@@ -8,7 +8,7 @@
 // --- CONFIGURAÇÕES DE REDE ---
 const char* ssid = "NOME_DA_REDE";
 const char* password = "SENHA_DA_REDE";
-const char* serverUrl = "http://xxx.xxx.xxx.x:xxxx/api";
+const char* serverUrl = "http://IP_DO_SERVIDOR:PORTA/api";
 
 // --- MAPEAMENTO DE PINOS ---
 // Botões
@@ -75,6 +75,7 @@ void setup() {
     Serial.print("."); 
   }
   Serial.println("\nWiFi Conectado com sucesso!");
+  testarConexaoTCP();
 }
 
 void loop() {
@@ -121,12 +122,19 @@ void enviarMensagem(String mensagem) {
     return;
   }
   
-  desenharRosto("feliz"); // Fica com cara de quem está "pensando/escutando"
-  Serial.println("Enviando requisição para a API Docker...");
+  desenharRosto("feliz"); // Fica com cara de quem está processando
+  Serial.println("\nAbrindo socket TCP direto com o servidor...");
   
-  HTTPClient http;
-  http.begin(serverUrl);
-  http.addHeader("Content-Type", "application/json");
+  WiFiClient client;
+  
+  // Tenta abrir a conexão física (O teste que você validou que funciona!)
+  if (!client.connect("192.168.10.5", 8000)) {
+    Serial.println("Falha na conexão TCP.");
+    desenharRosto("triste");
+    delay(3000);
+    desenharRosto("neutro");
+    return;
+  }
 
   // Prepara o JSON para envio
   StaticJsonDocument<256> doc;
@@ -134,37 +142,68 @@ void enviarMensagem(String mensagem) {
   String requestBody;
   serializeJson(doc, requestBody);
 
-  // Dispara o POST e aguarda a API processar e gerar o áudio
-  int httpResponseCode = http.POST(requestBody);
+  Serial.println("Enviando requisição HTTP manual...");
 
-  if (httpResponseCode == 200) {
-    String payload = http.getString();
-    
-    // Decodifica a resposta da sua API
-    StaticJsonDocument<512> responseDoc;
-    deserializeJson(responseDoc, payload);
+  // --- MONTANDO O PROTOCOLO HTTP NA MÃO ---
+  client.println("POST /api/bmo HTTP/1.1");
+  client.println("Host: 192.168.10.5");
+  client.println("Content-Type: application/json");
+  client.print("Content-Length: ");
+  client.println(requestBody.length());
+  client.println("Connection: close");
+  client.println(); // A linha em branco obrigatória que separa o cabeçalho do corpo
+  client.print(requestBody); // Injeta o JSON cru
+
+  // Aguarda a resposta do servidor (FastAPI processando na IA)
+  unsigned long timeout = millis();
+  while (client.connected() && !client.available()) {
+    if (millis() - timeout > 30000) { // Timeout de 30 segundos
+      Serial.println("Timeout aguardando resposta!");
+      client.stop();
+      desenharRosto("triste");
+      delay(3000);
+      desenharRosto("neutro");
+      return;
+    }
+    delay(10);
+  }
+
+  // Ignora o cabeçalho de resposta do servidor
+  while (client.available()) {
+    String line = client.readStringUntil('\n');
+    if (line == "\r") {
+      break; // Encontrou a linha em branco, o próximo dado é o JSON!
+    }
+  }
+
+  // Lê o corpo da resposta (O nosso JSON com a URL)
+  String payload = client.readString();
+  
+  // Deserializa a resposta
+  StaticJsonDocument<512> responseDoc;
+  DeserializationError error = deserializeJson(responseDoc, payload);
+  
+  if (!error) {
     const char* audioUrl = responseDoc["audio_url"];
     
-    Serial.println("--- SUCESSO ---");
+    Serial.println("--- SUCESSO ABSOLUTO ---");
     Serial.print("URL do Áudio Gerado: ");
     Serial.println(audioUrl);
-    Serial.println("-----------------");
+    Serial.println("------------------------");
 
-    // Mantém a carinha feliz por 3 segundos simulando o tempo da fala
+    // Mantém a carinha feliz por 3 segundos
     delay(3000); 
     desenharRosto("neutro");
-    
   } else {
-    Serial.print("Falha na API. Código HTTP: ");
-    Serial.println(httpResponseCode);
-    
-    // Expressão de erro
-    desenharRosto("triste"); 
+    Serial.print("Erro ao ler JSON da resposta: ");
+    Serial.println(error.c_str());
+    Serial.println("Payload recebido: " + payload);
+    desenharRosto("triste");
     delay(3000);
     desenharRosto("neutro");
   }
   
-  http.end();
+  client.stop(); // Fecha o socket
 }
 
 void desenharRosto(String emocao) {
@@ -201,4 +240,16 @@ void desenharRosto(String emocao) {
   }
   
   u8g2.sendBuffer(); 
+}
+
+void testarConexaoTCP() {
+  WiFiClient client;
+  Serial.print("\n[DIAGNÓSTICO] Tentando abrir socket TCP direto com 192.168.10.5 na porta 8000... ");
+  
+  if (client.connect("192.168.10.5", 8000)) {
+    Serial.println("SUCESSO! O ESP32 consegue enxergar o contêiner fisicamente.");
+    client.stop();
+  } else {
+    Serial.println("FALHOU! O roteador ou o firewall está barrando o MAC do ESP32.");
+  }
 }
